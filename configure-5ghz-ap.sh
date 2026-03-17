@@ -3,22 +3,28 @@
 ###############################################################################
 # OpenWrt 5GHz Access Point Configuration Script
 #
-# Purpose: Configure a 5GHz Access Point with auto-detection of radio hardware
+# Purpose: Configure a 5GHz Access Point with interactive user input
 #
 # Requirements:
 #   - OpenWrt system with uci and wifi utilities
 #   - 5GHz capable radio (802.11ac or 802.11ax)
 #
-# Usage: ./configure-5ghz-ap.sh [SSID] [PASSWORD] [NETWORK]
-#        Default: SSID=BOND, PASSWORD=carmel12, NETWORK=lan
+# Features:
+#   - Interactive prompts for SSID and password
+#   - Password validation (minimum 8 characters for WPA2)
+#   - Auto-detection of 5GHz radio
+#   - Security: uses read -s for hidden password input
+#   - Clears bash history at completion
+#
+# Usage: ./configure-5ghz-ap.sh
 ###############################################################################
 
 set -o pipefail
 
-# Configuration parameters (with defaults)
-SSID="${1:-BOND}"
-PASSWORD="${2:-carmel12}"
-NETWORK="${3:-lan}"
+# Configuration parameters
+SSID=""
+PASSWORD=""
+NETWORK="lan"
 
 # Color codes for output
 RED='\033[0;31m'
@@ -46,6 +52,111 @@ log_debug() {
     if [ "$DEBUG" = "1" ]; then
         echo -e "${YELLOW}[DEBUG]${NC} $1"
     fi
+}
+
+###############################################################################
+# Input Collection and Validation
+###############################################################################
+
+prompt_for_ssid() {
+    local ssid_input
+    read -p "Enter SSID (default: BOND): " ssid_input
+
+    # Use default if user just hits enter
+    if [ -z "$ssid_input" ]; then
+        ssid_input="BOND"
+    fi
+
+    # Validate SSID length (max 32 characters for WiFi SSID)
+    if [ ${#ssid_input} -gt 32 ]; then
+        log_error "SSID is too long (maximum 32 characters)"
+        return 1
+    fi
+
+    # Check for invalid characters (basic check)
+    if echo "$ssid_input" | grep -q "[^a-zA-Z0-9._-]"; then
+        log_warn "SSID contains special characters (only alphanumeric, dot, underscore, hyphen recommended)"
+    fi
+
+    echo "$ssid_input"
+    return 0
+}
+
+prompt_for_password() {
+    local password_input=""
+    local password_confirm=""
+    local attempts=0
+    local max_attempts=3
+
+    while [ $attempts -lt $max_attempts ]; do
+        # Use read -s for hidden password input
+        read -sp "Enter WiFi Password (minimum 8 characters): " password_input
+        echo ""
+
+        # Validate password length
+        if [ ${#password_input} -lt 8 ]; then
+            log_error "Password must be at least 8 characters long (WPA2 requirement)"
+            attempts=$((attempts + 1))
+            if [ $attempts -lt $max_attempts ]; then
+                log_info "Please try again ($((max_attempts - attempts)) attempts remaining)"
+            fi
+            continue
+        fi
+
+        # Check for valid characters (WPA2 compatible)
+        if echo "$password_input" | grep -q "[^a-zA-Z0-9!@#$%^&*()_+\-=\[\]{};:',.<>?/]"; then
+            log_error "Password contains invalid characters"
+            attempts=$((attempts + 1))
+            if [ $attempts -lt $max_attempts ]; then
+                log_info "Please try again ($((max_attempts - attempts)) attempts remaining)"
+            fi
+            continue
+        fi
+
+        # Ask user to confirm password
+        read -sp "Confirm Password: " password_confirm
+        echo ""
+
+        if [ "$password_input" != "$password_confirm" ]; then
+            log_error "Passwords do not match"
+            attempts=$((attempts + 1))
+            if [ $attempts -lt $max_attempts ]; then
+                log_info "Please try again ($((max_attempts - attempts)) attempts remaining)"
+            fi
+            continue
+        fi
+
+        # Password validated successfully
+        echo "$password_input"
+        return 0
+    done
+
+    log_error "Failed to enter valid password after $max_attempts attempts"
+    return 1
+}
+
+collect_user_input() {
+    log_info "========================================="
+    log_info "WiFi Access Point Configuration"
+    log_info "========================================="
+
+    # Prompt for SSID
+    while true; do
+        SSID=$(prompt_for_ssid)
+        if [ $? -eq 0 ]; then
+            break
+        fi
+    done
+
+    # Prompt for password
+    PASSWORD=$(prompt_for_password)
+    if [ $? -ne 0 ]; then
+        log_error "Unable to proceed without a valid password"
+        exit 1
+    fi
+
+    log_info "Configuration parameters accepted"
+    echo ""
 }
 
 ###############################################################################
@@ -229,9 +340,39 @@ validate_configuration() {
 # Main Execution
 ###############################################################################
 
+cleanup_and_exit() {
+    local exit_code=$?
+
+    # Clear bash history to remove password from terminal history
+    log_info "Clearing bash history for security..."
+    history -c  # Clear in-memory history
+    history -w  # Write empty history to file
+
+    # Also clear sensitive environment variables
+    unset SSID PASSWORD
+
+    # Overwrite the script history entry if possible
+    if [ -f ~/.bash_history ]; then
+        # Use shred if available, otherwise just truncate
+        if command -v shred &> /dev/null; then
+            shred -vfz -n 3 ~/.bash_history 2>/dev/null || true
+        else
+            cat /dev/null > ~/.bash_history
+        fi
+    fi
+
+    log_info "Cleanup complete"
+    return $exit_code
+}
+
+trap cleanup_and_exit EXIT
+
 main() {
     log_info "OpenWrt 5GHz Access Point Configuration"
     log_info "========================================="
+
+    # Collect user input first
+    collect_user_input
 
     # Detect 5GHz radio
     log_info "Detecting 5GHz radio..."
@@ -278,8 +419,9 @@ main() {
     log_info "  Encryption: psk2"
     log_info "  Network Bridge: $NETWORK"
     log_info "========================================="
+    log_info "WiFi Access Point is now active"
+    log_info "Users can connect using SSID: $SSID"
 }
 
 # Run main function
 main
-exit $?
