@@ -73,9 +73,10 @@ prompt_for_ssid() {
         return 1
     fi
 
-    # Check for invalid characters (basic check)
-    if echo "$ssid_input" | grep -q "[^a-zA-Z0-9._-]"; then
-        log_warn "SSID contains special characters (only alphanumeric, dot, underscore, hyphen recommended)"
+    # Check for invalid characters (only allow alphanumeric, dot, underscore, hyphen)
+    if ! echo "$ssid_input" | grep -q "^[a-zA-Z0-9._-]*$"; then
+        log_error "SSID contains invalid characters (only alphanumeric, dot, underscore, hyphen allowed)"
+        return 1
     fi
 
     echo "$ssid_input"
@@ -103,9 +104,10 @@ prompt_for_password() {
             continue
         fi
 
-        # Check for valid characters (WPA2 compatible)
-        if echo "$password_input" | grep -q "[^a-zA-Z0-9!@#$%^&*()_+\-=\[\]{};:',.<>?/]"; then
-            log_error "Password contains invalid characters"
+        # Check for valid characters (WPA2 supports all printable ASCII)
+        # Reject null characters, tabs, and other control characters
+        if echo "$password_input" | grep -q $'[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]'; then
+            log_error "Password contains invalid control characters"
             attempts=$((attempts + 1))
             if [ $attempts -lt $max_attempts ]; then
                 log_info "Please try again ($((max_attempts - attempts)) attempts remaining)"
@@ -343,13 +345,15 @@ validate_configuration() {
 cleanup_and_exit() {
     local exit_code=$?
 
-    # Clear bash history to remove password from terminal history
-    log_info "Clearing bash history for security..."
-    history -c  # Clear in-memory history
-    history -w  # Write empty history to file
+    # Clear sensitive environment variables immediately
+    unset SSID PASSWORD password_input password_confirm
 
-    # Also clear sensitive environment variables
-    unset SSID PASSWORD
+    # Clear bash history to remove password from terminal history
+    if [ -t 0 ]; then  # Only if connected to terminal (interactive shell)
+        log_info "Clearing bash history for security..."
+        history -c 2>/dev/null || true   # Clear in-memory history
+        history -w 2>/dev/null || true   # Write empty history to file
+    fi
 
     # Overwrite the script history entry if possible
     if [ -f ~/.bash_history ]; then
@@ -357,12 +361,12 @@ cleanup_and_exit() {
         if command -v shred &> /dev/null; then
             shred -vfz -n 3 ~/.bash_history 2>/dev/null || true
         else
-            cat /dev/null > ~/.bash_history
+            cat /dev/null > ~/.bash_history 2>/dev/null || true
         fi
     fi
 
     log_info "Cleanup complete"
-    return $exit_code
+    exit $exit_code  # Use exit, not return, for trap handler
 }
 
 trap cleanup_and_exit EXIT
@@ -405,6 +409,10 @@ main() {
         log_error "Failed to apply configuration"
         exit 1
     fi
+
+    # Clear password from memory immediately after use
+    PASSWORD=""
+    unset PASSWORD
 
     log_info "WiFi service restarted successfully"
 
